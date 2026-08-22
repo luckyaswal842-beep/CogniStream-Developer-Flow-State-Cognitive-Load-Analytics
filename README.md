@@ -41,95 +41,83 @@
 
 ---
 
-## 📅 Week 1 Overview & Objectives
+## 📅  # Developer Flow & Interruption Analytics
 
-During **Week 1**, the foundation for the **CogniStream** developer telemetry pipeline was established. We successfully ingested raw event logs, created unconstrained staging tables, completed exploratory profiling to identify data anomalies, and initialized our dimensional modeling and Power BI scaffolding.
+A data cleaning project analyzing how software developers spend their working hours — tracking deep focus ("flow") time versus time lost to interruptions like Slack messages, meetings, and alerts.
 
-| Milestone / Focus Area | Status | Key Artifact / Action |
-| :--- | :---: | :--- |
-| **Raw Data Ingestion** | 🟢 Complete | Created unconstrained `stg_` tables for 158k+ activity logs & 150 developer profiles. |
-| **Data Profiling & Audit** | 🟢 Complete | Identified timeline inversions, duration outliers, and missing interruption foreign keys. |
-| **Star Schema Architecture** | 🟢 Complete | Designed a two-tier fact model linking 2 facts to 4 dimensions. |
-| **Power BI Initialization** | 🟢 Complete | Configured workspace theme, report structure, and single-direction $1:*$ relationships. |
+## Project Overview
 
----
+This project uses IoT-style activity tracking data from 150 developers across 5 teams (Infra & CI/CD, Frontend Platform, Core Engine, Product Eng, Data Platform), logged over a 3-month period (Jan–Mar 2026). Every work session is recorded — what the developer was doing, whether they were interrupted, and how long it took them to mentally recover afterward.
 
-## 🏗️ 1. SQL Staging & Data Ingestion Setup
+The goal so far has been to take the raw source files and turn them into clean, reliable, ready-to-analyze data.
 
-To prevent schema lockouts and import crashes during ingestion, raw CSV telemetry files were loaded into unconstrained staging tables:
+## Tools Used
 
-```sql
--- 1. Staging Table: Granular Activity Logs (158,152 raw rows)
-CREATE TABLE stg_developer_activity_log (
-    log_id TEXT,
-    developer_id TEXT,
-    date_key TEXT,
-    timestamp_start TEXT,
-    timestamp_end TEXT,
-    activity_id TEXT,
-    interruption_id TEXT,
-    session_duration_minutes TEXT,
-    in_flow_state TEXT,
-    context_switch_flag TEXT,
-    cognitive_recovery_minutes TEXT
-);
+- **Python** (pandas, numpy) — data cleaning and merging
+- **Jupyter Notebook** — step-by-step cleaning process
 
--- 2. Staging Table: Developer Profiles (150 developer records)
-CREATE TABLE stg_developer (
-    developer_id TEXT,
-    developer_name TEXT,
-    team_name TEXT,
-    seniority_level TEXT,
-    primary_ide TEXT,
-    timezone TEXT
-);
-🔍 2. Data Profiling & Audit Insights
-We executed exploratory audit queries to uncover data hygiene issues before production transformation:
+## Project Structure
 
-SQL
--- Auditing missing IDs, invalid timestamps, and duration extremes
-SELECT 
-    COUNT(*) AS total_raw_rows,
-    SUM(CASE WHEN developer_id IS NULL OR TRIM(developer_id) = '' THEN 1 ELSE 0 END) AS missing_dev_ids,
-    SUM(CASE WHEN timestamp_start IS NULL OR TRIM(timestamp_start) = '' THEN 1 ELSE 0 END) AS missing_timestamps,
-    SUM(CASE WHEN session_duration_minutes::NUMERIC < 0 THEN 1 ELSE 0 END) AS negative_durations,
-    SUM(CASE WHEN session_duration_minutes::NUMERIC > 480 THEN 1 ELSE 0 END) AS excessive_durations
-FROM stg_developer_activity_log;
-🚨 Key Audit Findings & Remediation Plan:
-Timestamp Sequence Inversion: Found records where timestamp_end < timestamp_start.
+    Developer-Flow-Analytics/
+    ├── README.md
+    ├── data/
+    │   ├── raw/
+    │   │   ├── fact_developer_activity_log.csv
+    │   │   ├── fact_flow_daily.csv
+    │   │   ├── dim_developer.csv
+    │   │   ├── dim_activity_type.csv
+    │   │   ├── dim_interruption.csv
+    │   │   └── dim_date.csv
+    │   └── cleaned/
+    │       ├── fact_developer_activity_log_cleaned.csv
+    │       ├── fact_flow_daily_cleaned.csv
+    │       ├── dim_developer_cleaned.csv
+    │       ├── dim_activity_type_cleaned.csv
+    │       ├── dim_interruption_cleaned.csv
+    │       ├── dim_date_cleaned.csv
+    │       └── activity_log_merged.csv
+    └── notebooks/
+        ├── Dev_Flow_Data_Cleaning.ipynb
+        └── Dev_Flow_Data_Merging.ipynb
 
-Remediation: Added SQL filter WHERE timestamp_end >= timestamp_start.
+## The Dataset
 
-Overlapping Telemetry Duplicates: Polling overlaps caused duplicate session rows.
+This is a star-schema dataset made up of 2 fact tables and 4 dimension (lookup) tables:
 
-Remediation: Enforced deduplication using ROW_NUMBER() OVER (PARTITION BY log_id ORDER BY timestamp_start).
+| File | Rows | Description |
+|---|---|---|
+| `fact_developer_activity_log.csv` | 158,152 | The most detailed table — one row per work session (coding, meetings, debugging, etc.) |
+| `fact_flow_daily.csv` | 9,600 | One row per developer per day — a daily summary of focus time and interruptions |
+| `dim_developer.csv` | 150 | Developer info — name, team, seniority, IDE used, timezone |
+| `dim_activity_type.csv` | 6 | What each activity type means (e.g. coding, code review, meetings) |
+| `dim_interruption.csv` | 8 | What each interruption type means (e.g. Slack DM, PagerDuty alert) |
+| `dim_date.csv` | 90 | Calendar lookup — day of week, sprint name, weekend flag |
 
-Missing Interruption Codes: Null/empty interruption_id fields.
+## What Was Done So Far
 
-Remediation: Used COALESCE(NULLIF(TRIM(interruption_id), ''), '0')::INT to map all nulls to key 0 (Continuous Focus / No Interruption).
+### 1. Data Cleaning (`Dev_Flow_Data_Cleaning.ipynb`)
+- Loaded all 6 raw files and checked their shape and structure
+- Checked every file for duplicate rows and missing values
+- Converted timestamp and date columns into proper date/time types
+- Checked that the numbers made sense — no negative durations, no sessions ending before they start, no impossible values
+- Found and fixed one tricky issue: the word `"None"` in `dim_interruption.csv` (meaning "no interruption") was being read by pandas as a missing value instead of actual text
+- Checked that every ID in the main activity log (developer, activity, interruption, date) correctly matches a row in its lookup table
+- Saved all 6 cleaned files
 
-📐 3. Star Schema Architecture Design
-+-------------------+
-                  |   dim_developer   |
-                  +---------+---------+
-                            |
-  +------------------+      | 1:N     +-------------------+
-  |     dim_date     +------|-------->+   fact_flow_daily  |
-  +--------+---------+      |         +-------------------+
-           |                |                   ^
-           | 1:N            | 1:N               | 1:N
-           v                v                   |
-  +--------+----------------+---------+         |
-  |     fact_developer_activity_log    +---------+
-  +--------+----------------+---------+
-           ^                ^
-           | 1:N            | 1:N
-  +--------+---------+   +--+-----------------+
-  | dim_activity_type|   |   dim_interruption  |
-  +------------------+   +--------------------+
+### 2. Data Merging (`Dev_Flow_Data_Merging.ipynb`)
+- Loaded the cleaned files
+- Re-checked that all IDs still matched correctly before joining
+- Combined the main activity log with all 4 lookup tables into a single merged file (`activity_log_merged.csv`), so all the useful info (developer name, team, activity type, interruption type, date/sprint info) is available in one place
+- Confirmed no missing values were introduced by the merge
 
-🎯Week 2 Action PlanExecute Production Cleansing:
-# Run final SQL transformation scripts to generate fact_developer_activity_log_clean and dim_developer_clean.
-# Referential Integrity Enforcement: Prune orphan foreign keys and create primary/foreign key constraints.
-# DAX Implementation: Build core business measures (Pure Flow Hours, Cognitive Recovery Tax, Context-Switching Tax %).
-# Visual Prototyping: Build top-level Executive KPI cards and preliminary team comparison charts in Power BI[cite: 2].
+## Key Findings from Cleaning
+
+- The raw data was already in good shape — no duplicate rows and no missing values in the true source data
+- Average flow efficiency across all developers and days is about 79%
+- Developer names repeat across a shared name pool (e.g. multiple people named "Marcus Vance"), but each has a unique `developer_id`, so this is expected and not a data error
+
+## Next Steps
+
+- Explore the merged data further (which teams/interruption types affect flow the most, trends by sprint, etc.)
+- Build a Power BI dashboard on top of the merged dataset
+- Write up business insights and recommendations, similar to the AtmoSync project
